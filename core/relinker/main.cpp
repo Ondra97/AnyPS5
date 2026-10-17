@@ -210,7 +210,7 @@ int Run(const int argc, char* argv[]) {
                 throw Domain::RelinkerException("--executable must be a file inside the guest module parent directory: " + executable);
             const auto input = moduleRoot / relative;
             if (!std::filesystem::is_regular_file(input)) throw Domain::RelinkerException("--executable is not a file: " + Io::Utf8Path(input));
-            if (std::find(moduleDirectories.begin(), moduleDirectories.end(), input.parent_path()) != moduleDirectories.end())
+            if (std::any_of(moduleDirectories.begin(), moduleDirectories.end(), [&](const auto& directory) { return Cli::SameDirectory(directory, input.parent_path()); }))
                 throw Domain::RelinkerException("--executable is in a guest module directory: " + executable);
             std::string name;
             for (const auto& part : relative) name += (name.empty() ? "" : ".") + Io::Utf8Path(part);
@@ -315,6 +315,11 @@ int Run(const int argc, char* argv[]) {
         }
         for (const auto& executable : executables) {
             fileWriter.Write(executable.OutputPath, executable.Bytes);
+            if (!args.toWindows) {
+                std::error_code error;
+                std::filesystem::permissions(Io::NativePath(executable.OutputPath), std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec | std::filesystem::perms::others_exec, std::filesystem::perm_options::add, error);
+                if (error) throw Domain::RelinkerException("Cannot make the output executable: " + executable.OutputPath + " (" + error.message() + ")");
+            }
             progress.Report({Domain::ProgressStage::Write, absPath, ++written, outputCount});
         }
         if (args.writeRegistry) {
