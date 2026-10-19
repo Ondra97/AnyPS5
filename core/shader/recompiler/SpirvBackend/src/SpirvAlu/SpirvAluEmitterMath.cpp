@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <initializer_list>
+#include <map>
 #include <optional>
 #include <string>
 #include <unordered_set>
@@ -318,8 +319,6 @@ bool EveryInvocationEnters(IrShaderStage stage) {
 }
 
 class EntryLaneWalk {
-    enum class Proof : std::size_t { ZeroBit, NotHelper, LowWord, HighWord, LowWord64, HighWord64 };
-
 public:
     explicit EntryLaneWalk(IrShaderStage stage) : everyInvocationEnters(EveryInvocationEnters(stage)) {}
 
@@ -336,22 +335,59 @@ public:
     }
 
 private:
-    template<typename TCheck>
-    bool Prove(const IrValue* value, Proof proof, TCheck&& check) {
-        value = Resolved(value);
-        if (value == nullptr) return false;
-        auto& cache = proven[static_cast<std::size_t>(proof)];
-        if (cache.contains(value)) return true;
-        if (!Spend()) return false;
-        const auto generation = cycleGeneration;
-        const bool result = check(value);
-        if (result && (phis.empty() || generation == cycleGeneration)) cache.insert(value);
-        return result;
-    }
+    enum class Proof : std::uint8_t { ZeroBit, NotHelper, LowWord, HighWord, LowWord64, HighWord64 };
+    using Key = std::pair<const IrValue*, Proof>;
+    struct Assumption {
+        std::size_t depth;
+        std::uint64_t order;
+    };
+    static constexpr std::size_t Unbounded = static_cast<std::size_t>(-1);
 
     bool Spend() {
         if (budget == 0u) return false;
         --budget;
+        return true;
+    }
+
+    template<typename TCheck>
+    bool Prove(const IrValue* value, Proof proof, TCheck&& check) {
+        value = Resolved(value);
+        if (value == nullptr) return false;
+        const Key key{value, proof};
+        if (const auto found = settled.find(key); found != settled.end()) return found->second;
+        if (const auto found = active.find(key); found != active.end()) return Assume(found->second);
+        if (const auto found = assumed.find(key); found != assumed.end()) return Assume(found->second.depth);
+        if (!Spend()) return false;
+        const auto outer = dependency;
+        const auto depth = active.size();
+        const auto mark = created;
+        dependency = Unbounded;
+        active.emplace(key, depth);
+        const bool result = check(value);
+        active.erase(key);
+        const auto inner = dependency;
+        const bool holds = result && inner >= depth;
+        for (auto entry = assumed.begin(); entry != assumed.end();) {
+            if (entry->second.order < mark) {
+                ++entry;
+                continue;
+            }
+            if (result && !holds) {
+                entry->second.depth = std::min(entry->second.depth, inner);
+                ++entry;
+                continue;
+            }
+            if (holds) settled.emplace(entry->first, true);
+            entry = assumed.erase(entry);
+        }
+        if (result && !holds) assumed.emplace(key, Assumption{inner, created++});
+        else settled.emplace(key, result);
+        dependency = result && !holds ? std::min(outer, inner) : outer;
+        return result;
+    }
+
+    bool Assume(std::size_t depth) {
+        dependency = std::min(dependency, depth);
         return true;
     }
 
@@ -395,21 +431,18 @@ private:
     }
 
     template<typename TCheck>
-    bool Incoming(const IrValue* phi, TCheck&& check) {
-        if (!phis.insert(phi).second) {
-            ++cycleGeneration;
-            return true;
-        }
+    static bool Incoming(const IrValue* phi, TCheck&& check) {
         bool result = phi->ArgumentCount() != 0u;
         for (std::size_t index = 0; result && index < phi->ArgumentCount(); ++index) result = check(phi->Argument(index));
-        phis.erase(phi);
         return result;
     }
 
     bool everyInvocationEnters;
-    std::unordered_set<const IrValue*> phis;
-    std::array<std::unordered_set<const IrValue*>, 6> proven;
-    std::uint32_t cycleGeneration = 0u;
+    std::map<Key, std::size_t> active;
+    std::map<Key, Assumption> assumed;
+    std::map<Key, bool> settled;
+    std::size_t dependency = Unbounded;
+    std::uint64_t created = 0u;
     std::uint32_t budget = 2048u;
 };
 

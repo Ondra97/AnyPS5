@@ -3938,7 +3938,7 @@ void verifyHalfWaveReduction() {
     }};
     for (const auto& reduction : scans) require(reductions(pixel(scan(reduction.identity, reduction.vector, reduction.scalar), 32u, true), reduction.reduce) == 1u, reduction.message);
     auto loopScan = scan(0xffffffffu, 0x26000000u, 0x83800000u);
-    const auto savedMaskLoop = AgcTest::SavedExecMaskLoop(3u);
+    const auto savedMaskLoop = AgcTest::SavedExecMaskLoop(8u);
     loopScan.insert(loopScan.begin(), savedMaskLoop.begin(), savedMaskLoop.end());
     auto helperLoop = loopScan;
     helperLoop[0] = 0xbea204c1u;
