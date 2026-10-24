@@ -1,3 +1,5 @@
+#include "prx/libSceSaveData/include/Api.hpp"
+#include "prx/libSceSaveData.native/include/Api.hpp"
 #include "SceTypes.hpp"
 #include <algorithm>
 #include <array>
@@ -9,14 +11,6 @@
 #include <source_location>
 #include <stdexcept>
 #include <string>
-
-extern "C" {
-int APS5_VABI sceSaveDataInitialize3(const void*);
-int APS5_VABI sceSaveDataMount3(const SaveDataMount3*, SaveDataMountResult*);
-int APS5_VABI sceSaveDataUmount2(std::uint32_t, const SaveDataMountPoint*);
-int APS5_VABI sceSaveDataLoadIcon(const SaveDataMountPoint*, SaveDataIcon*);
-int APS5_VABI sceSaveDataSaveIcon(const SaveDataMountPoint*, const SaveDataIcon*);
-}
 
 static constexpr int Parameter = static_cast<int>(0x809F0000);
 static constexpr int NotMounted = static_cast<int>(0x809F0004);
