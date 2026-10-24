@@ -621,13 +621,13 @@ bool DepthSupported(const Context& context, VkFormat format, std::uint32_t fragm
     return result == VK_SUCCESS && (properties.sampleCounts & fragments) != 0u && (context.limits.framebufferDepthSampleCounts & fragments) != 0u;
 }
 
-void CheckDrawFeedback() {
+void CheckDrawFeedback(std::optional<bool> bufferFeedback = std::nullopt) {
     const auto device = OpenVulkanTestDevice();
     Require(device != nullptr, "native depth draw feedback requires Vulkan");
     constexpr VkExtent2D extent{5u, 3u};
     constexpr std::uint32_t samples = 4u;
     const auto depthBytes = static_cast<std::size_t>(MultisampledDepthBytes_nid_no_patch(extent, 4u, samples));
-    TargetMemory memory(depthBytes), metadata(65536u);
+    TargetMemory memory(bufferFeedback.has_value() ? depthBytes * 2u : depthBytes, bufferFeedback.has_value()), metadata(65536u);
     std::memset(metadata.Data(), 0, 65536u);
     DepthTarget depth{memory.Address(), 0u, extent, VK_FORMAT_D32_SFLOAT, 0.0f, 0u, metadata.Address(), false, samples};
     depth.depthSwizzle = 24u;
@@ -678,6 +678,57 @@ void CheckDrawFeedback() {
     const std::array<CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0u}, {ShaderRecompiler::ShaderStage::Fragment, &reader, pixelOffset}}};
     TargetRefuses([&] { device->Draw(state, draw, shaders); }, "sampling a native multisampled depth target the draw attaches");
     device->WaitIdle();
+    if (bufferFeedback.has_value()) {
+        const bool sampledBufferOnly = *bufferFeedback;
+        ShaderRecompiler::RecompileResult writer = sampledBufferOnly ? reader : producer;
+        writer.spirv = DepthFeedbackFragmentShader(binding, sampledBufferOnly, 0.0f, true);
+        writer.variantId = 4u;
+        ShaderRecompiler::DescriptorBinding buffer{};
+        buffer.kind = ShaderRecompiler::DescriptorKind::StorageBuffer;
+        buffer.role = ShaderRecompiler::DescriptorRole::GuestBuffers;
+        buffer.descriptorSet = ShaderRecompiler::RuntimeAbi::DescriptorSet;
+        buffer.binding = static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Buffers);
+        buffer.count = 1u;
+        buffer.guestDescriptor = {static_cast<std::uint32_t>(depth.address), static_cast<std::uint32_t>(depth.address >> 32u) | (4u << 16u), static_cast<std::uint32_t>(depthBytes / 4u), 0x00014204u};
+        buffer.bufferWritten = {true};
+        buffer.bufferRead = {false};
+        writer.bindings.push_back(std::move(buffer));
+        const std::array<CompiledShader, 2> writing{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0u}, {ShaderRecompiler::ShaderStage::Fragment, &writer, pixelOffset}}};
+        if (sampledBufferOnly) {
+            TargetMemory output(depthBytes, true);
+            auto disjoint = writer;
+            auto& descriptor = disjoint.bindings.back().guestDescriptor;
+            descriptor[0] = static_cast<std::uint32_t>(output.Address());
+            descriptor[1] = static_cast<std::uint32_t>(output.Address() >> 32u) | (4u << 16u);
+            const std::array<CompiledShader, 2> separate{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0u}, {ShaderRecompiler::ShaderStage::Fragment, &disjoint, pixelOffset}}};
+            ShaderResources resources(device->graphicsContext(), separate, {}, 0u, 0u, 0u);
+            Require(!resources.Reusable(), "native multisample sampling unexpectedly retained a reusable resource set");
+            ShaderResources refreshed(device->graphicsContext(), separate, {}, 0u, 0u, 0u);
+            TargetRefuses([&] { ShaderResources overlapping(device->graphicsContext(), writing, {}, 0u, 0u, 0u); }, "a writable shader buffer overlaps sampled native depth");
+            device->WaitIdle();
+            std::puts("Native sampled buffer feedback refused while disjoint resource rebuilds remained supported");
+            return;
+        }
+        auto adjacent = writer;
+        auto& adjacentDescriptor = adjacent.bindings.back().guestDescriptor;
+        const auto adjacentAddress = depth.address + depthBytes;
+        adjacentDescriptor[0] = static_cast<std::uint32_t>(adjacentAddress);
+        adjacentDescriptor[1] = static_cast<std::uint32_t>(adjacentAddress >> 32u) | (4u << 16u);
+        adjacentDescriptor[2] = 1u;
+        const std::array<CompiledShader, 2> separate{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0u}, {ShaderRecompiler::ShaderStage::Fragment, &adjacent, pixelOffset}}};
+        auto onePixel = state;
+        onePixel.scissor.extent = {1u, 1u};
+        device->Draw(onePixel, draw, separate);
+        device->WaitIdle();
+        AgcDriver::GuestMemory::FlushGpuWrites(adjacentAddress, 4u);
+        std::uint32_t adjacentValue = 0u;
+        std::memcpy(&adjacentValue, memory.Data() + depthBytes, sizeof(adjacentValue));
+        Require(adjacentValue == 0x12345678u && DepthSurfaceAt(depth.address), "an adjacent shader buffer write disturbed native depth ownership");
+        TargetRefuses([&] { device->Draw(state, draw, writing); }, "a writable shader buffer overlaps a native depth attachment");
+        device->WaitIdle();
+        std::puts("Native attachment buffer feedback refused while adjacent GPU writes remained supported");
+        return;
+    }
     TargetMemory testedMemory(depthBytes), testedMetadata(65536u);
     std::memset(testedMetadata.Data(), 0, 65536u);
     const auto guestByte = [](std::size_t offset) { return static_cast<std::byte>(offset * 7u + 3u); };
@@ -1672,6 +1723,8 @@ int main(int argc, char** argv) {
             std::printf("skipped, no usable Vulkan device: %s\n", error.what());
             return VulkanTestSkipped;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--attachment-buffer-feedback") { CheckDrawFeedback(false); return 0; }
+        if (argc == 2 && std::string_view(argv[1]) == "--sampled-buffer-feedback") { CheckDrawFeedback(true); return 0; }
         if (argc == 2 && std::string_view(argv[1]) == "--cached-draw-publication") { CheckCachedDrawPublication(); return 0; }
         if (argc == 2 && std::string_view(argv[1]) == "--buffer-publication") { CheckRetiredNativeWriteRefusal(); CheckRetiredNativeWriteRefusal(true); CheckPairedBufferOverwrite(); return 0; }
         CheckDrawFeedback();
