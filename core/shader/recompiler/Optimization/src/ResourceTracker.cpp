@@ -255,10 +255,28 @@ private:
         return true;
     }
 
-    std::uint32_t InternSource(const DescriptorSource& descriptor) {
+    std::uint32_t InternSource(DescriptorSource descriptor) {
+        if (!m_readOrigins.empty()) {
+            std::vector<const IrValue*> pending(descriptor.dwords.begin(), descriptor.dwords.begin() + descriptor.dwordCount);
+            std::unordered_set<const IrValue*> visited;
+            const auto& order = m_program.BlockOrder();
+            while (!pending.empty()) {
+                const IrValue* value = pending.back()->Resolve();
+                pending.pop_back();
+                if (!visited.insert(value).second) continue;
+                if (const auto origin = m_readOrigins.find(value); origin != m_readOrigins.end()) {
+                    const auto block = std::ranges::find(order, origin->second);
+                    if (block == order.end()) fail("copied descriptor read has no resource control-flow block");
+                    descriptor.requiredBlocks.push_back(static_cast<std::uint32_t>(block - order.begin()));
+                }
+                for (const IrValue* argument : value->Arguments()) pending.push_back(argument);
+            }
+            std::ranges::sort(descriptor.requiredBlocks);
+            descriptor.requiredBlocks.erase(std::unique(descriptor.requiredBlocks.begin(), descriptor.requiredBlocks.end()), descriptor.requiredBlocks.end());
+        }
         for (std::uint32_t candidate = 0; candidate < m_sources.size(); candidate++) {
             const auto& current = m_sources[candidate];
-            if (current.dwordCount != descriptor.dwordCount || current.tableColumn != descriptor.tableColumn) {
+            if (current.dwordCount != descriptor.dwordCount || current.tableColumn != descriptor.tableColumn || current.requiredBlocks != descriptor.requiredBlocks) {
                 continue;
             }
             bool same = true;
@@ -299,6 +317,7 @@ private:
         const auto& order = m_program.BlockOrder();
         const auto& info = m_program.Metadata().blockInfo;
         if (order.empty() || order.size() != info.size()) {
+            if (std::ranges::any_of(m_sources, [](const DescriptorSource& source) { return !source.requiredBlocks.empty(); })) fail("copied descriptor reads require resource control flow");
             return;
         }
         std::unordered_map<const IrBlock*, std::uint32_t> indexOf;
@@ -360,7 +379,7 @@ private:
                 reachedFlat[slot] = 1u;
             }
         }
-        bool guarded = false;
+        bool guarded = std::ranges::any_of(m_sources, [](const DescriptorSource& source) { return !source.requiredBlocks.empty(); });
         for (const auto& block : controlFlow) {
             for (const auto source : block.sources) {
                 guarded = guarded || reached[source] == 0u;
@@ -1020,12 +1039,16 @@ private:
     IrValue* EmitCopy(const IrValue& original, std::span<IrValue* const> arguments, IrValue& position) {
         if (Detail::IsRawRead(m_program.Resources(), original)) {
             auto flags = original.Flags<MemoryFlags>();
-            const auto memory = m_program.Resources().memoryInfo[flags.index];
+            auto memory = m_program.Resources().memoryInfo[flags.index];
+            memory.planningOnly = true;
             flags.index = static_cast<std::uint32_t>(m_program.Resources().memoryInfo.size());
             m_program.Resources().memoryInfo.push_back(memory);
             std::uint64_t rawFlags = 0;
             std::memcpy(&rawFlags, &flags, sizeof(flags));
-            return EmitBefore(position, original.Opcode(), original.Type(), arguments, rawFlags);
+            IrValue* copy = EmitBefore(position, original.Opcode(), original.Type(), arguments, rawFlags);
+            const auto origin = m_readOrigins.find(&original);
+            m_readOrigins.emplace(copy, origin != m_readOrigins.end() ? origin->second : original.Parent());
+            return copy;
         }
         return EmitBefore(position, original.Opcode(), original.Type(), arguments, original.Flags<std::uint64_t>());
     }
@@ -2359,6 +2382,7 @@ private:
     ShaderInfo m_info;
     IrBuilder m_builder;
     std::vector<DescriptorSource> m_sources;
+    std::unordered_map<const IrValue*, const IrBlock*> m_readOrigins;
     std::vector<std::vector<std::uint32_t>> m_blockSources;
     std::vector<std::vector<std::uint32_t>> m_blockImages;
     std::uint32_t m_currentBlock = std::numeric_limits<std::uint32_t>::max();
