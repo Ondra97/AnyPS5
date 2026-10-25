@@ -4535,6 +4535,12 @@ void verifyDescriptorPhis() {
         std::vector<std::uint8_t> interpretedActive;
         SrtWalker{}.EvaluateRuntimeSources(cachedRawPlan, imageSources, rawView.MakeRuntime(rawUserData, rawRequest.shader.codeAddress), interpretedImages, interpretedFlat, cachedRawPlan.cleanFlatSlots, interpretedActive);
         require(std::ranges::equal(interpretedImages, cachedSnapshot.images, [](const DescriptorValue& first, const DescriptorValue& second) { return first.dwords == second.dwords; }), "descriptor Phi: interpreted source queries changed skipped raw reads");
+        require(imageSources == cachedRawPlan.materializationSources, "descriptor Phi: the raw fixture has non-image materialization sources");
+        const auto* tape = Detail::SrtTape::For(cachedRawPlan);
+        require(tape != nullptr, "descriptor Phi: the guarded plan has no SRT tape");
+        std::vector<DescriptorValue> tapeImages;
+        require(tape->Run(cachedRawPlan, rawView.MakeRuntime(rawUserData, rawRequest.shader.codeAddress), tapeImages, interpretedFlat, interpretedActive), "descriptor Phi: the SRT tape refused skipped raw reads");
+        require(std::ranges::equal(tapeImages, interpretedImages, [](const DescriptorValue& first, const DescriptorValue& second) { return first.dwords == second.dwords; }), "descriptor Phi: SRT tape and interpreted raw reads disagree");
         require(!Recompile(rawRequest).spirv.empty(), "descriptor Phi: an untaken scalar-address arm prevented recompilation");
     }
     rawUserData[7] = 1u;
