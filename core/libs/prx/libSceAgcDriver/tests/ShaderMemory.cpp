@@ -4528,6 +4528,13 @@ void verifyDescriptorPhis() {
         ResourceMaterializer{}.Materialize(cachedRawPlan, rawView.MakeRuntime(rawUserData, rawRequest.shader.codeAddress), cachedSnapshot);
         require(cachedSnapshot.nullRootReads == 0u && cachedSnapshot.srtPoison.empty(), "descriptor Phi: a cached inactive raw read reported a null root or fault");
         require(std::ranges::equal(cachedSnapshot.images, skipped->snapshot.images, [](const DescriptorValue& first, const DescriptorValue& second) { return first.dwords == second.dwords; }), "descriptor Phi: the decoded plan changed skipped raw reads");
+        std::vector<std::uint32_t> imageSources;
+        for (const auto& image : cachedRawPlan.info.images) imageSources.push_back(image.source);
+        std::vector<DescriptorValue> interpretedImages;
+        std::vector<std::uint32_t> interpretedFlat;
+        std::vector<std::uint8_t> interpretedActive;
+        SrtWalker{}.EvaluateRuntimeSources(cachedRawPlan, imageSources, rawView.MakeRuntime(rawUserData, rawRequest.shader.codeAddress), interpretedImages, interpretedFlat, cachedRawPlan.cleanFlatSlots, interpretedActive);
+        require(std::ranges::equal(interpretedImages, cachedSnapshot.images, [](const DescriptorValue& first, const DescriptorValue& second) { return first.dwords == second.dwords; }), "descriptor Phi: interpreted source queries changed skipped raw reads");
         require(!Recompile(rawRequest).spirv.empty(), "descriptor Phi: an untaken scalar-address arm prevented recompilation");
     }
     rawUserData[7] = 1u;
