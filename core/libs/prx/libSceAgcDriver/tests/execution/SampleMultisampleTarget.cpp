@@ -1076,11 +1076,11 @@ int main(int argc, char** argv) {
                 device->WaitIdle();
             }, "deferred dispatch", missing);
         }
-        bool reused = false;
+        bool recipeReused = false;
         if (recipe != nullptr) {
             const auto hit = device->PrepareRecipe(recipe, false);
             Require(hit != nullptr, "the warmed buffer recipe did not retain its template");
-            reused = true;
+            recipeReused = true;
             CheckBufferRefused([&] {
                 AgcDriver::VulkanDevice::IndirectOutcome outcome{};
                 device->DispatchRecipe(warm, 1, 1, 1, 0, reinterpret_cast<std::uintptr_t>(BufferLoadCode.data()), hit, outcome);
@@ -1089,7 +1089,7 @@ int main(int argc, char** argv) {
         }
         CheckBufferLoad(*device, CompileBufferLoad(*device, block.Address() + colorBytes, output.Address()), output);
         CheckUniform(LoadSamples(*device, block), Ones, "after the native buffer access refusals and adjacent buffer control");
-        std::cout << "native buffer controls: adjacent=passed deferred=" << (prepared != nullptr) << " recipe=" << reused << std::endl;
+        std::cout << "native buffer controls: adjacent=passed deferred=" << (prepared != nullptr) << " recipe=" << recipeReused << std::endl;
         std::string failures;
         for (const auto& item : missing) failures += " " + item;
         Require(missing.empty(), "buffer aliases of live native MSAA color memory bypassed the guard:" + failures);
