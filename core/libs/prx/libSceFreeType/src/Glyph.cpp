@@ -1,3 +1,4 @@
+#include "prx/libSceFreeType/include/Api.hpp"
 #include "prx/libSceFreeType/include/GuestObjects.hpp"
 #include "prx/libc/include/General.hpp"
 
@@ -11,8 +12,6 @@
 #include <utility>
 
 using namespace FreeType;
-
-extern "C" void APS5_VABI FT_Outline_Get_CBox_nid_postfix(const GuestOutline*, GuestBBox*);
 
 namespace {
 
