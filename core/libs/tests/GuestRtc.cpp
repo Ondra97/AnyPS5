@@ -8,7 +8,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <chrono>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -16,6 +15,7 @@
 #include <string_view>
 #include <initializer_list>
 #include <limits>
+#include <random>
 
 static void Require(bool value) { if (!value) std::abort(); }
 
@@ -64,7 +64,7 @@ static void SetCompiledSdkVersion(std::byte* process, std::uint32_t version) {
 }
 
 static void EnterTitleDirectory(const char* titleId) {
-    const auto directory = std::filesystem::temp_directory_path() / ("rtc-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto directory = std::filesystem::temp_directory_path() / ("rtc-test-" + std::to_string(std::random_device{}()));
     std::filesystem::create_directories(directory / "app0" / "sce_sys");
     std::filesystem::current_path(directory);
     if (titleId == nullptr) return;
@@ -186,6 +186,25 @@ int main(int argc, char** argv) {
     Require(sceRtcGetDosTime(&dosEarly, &dosTime) == invalidYear && dosTime == 0);
     const RtcDateTime dosLate{2108, 1, 1, 0, 0, 0, 0};
     Require(sceRtcGetDosTime(&dosLate, &dosTime) == invalidYear && dosTime == 0xff9fbf7du);
+    const RtcDateTime dosMeasured{2026, 10, 22, 21, 30, 59, 999999};
+    Require(sceRtcGetDosTime(&dosMeasured, &dosTime) == 0 && dosTime == 0x5d56abddu);
+    const RtcDateTime dosFirstYear{1, 1, 1, 0, 0, 0, 0};
+    Require(sceRtcGetDosTime(&dosFirstYear, &dosTime) == invalidYear && dosTime == 0);
+    const RtcDateTime dosLastYear{9999, 12, 31, 23, 59, 59, 0};
+    Require(sceRtcGetDosTime(&dosLastYear, &dosTime) == invalidYear && dosTime == 0xff9fbf7du);
+    dosTime = 0xbbbbbbbbu;
+    const RtcDateTime dosYearZero{0, 1, 1, 0, 0, 0, 0};
+    Require(sceRtcGetDosTime(&dosYearZero, &dosTime) == invalidYear && dosTime == 0xbbbbbbbbu);
+    const RtcDateTime dosBadDay{2026, 2, 30, 0, 0, 0, 0};
+    Require(sceRtcGetDosTime(&dosBadDay, &dosTime) == invalidDay && dosTime == 0xbbbbbbbbu);
+    const RtcDateTime dosBadHour{2026, 1, 1, 24, 0, 0, 0};
+    Require(sceRtcGetDosTime(&dosBadHour, &dosTime) == invalidHour && dosTime == 0xbbbbbbbbu);
+    const RtcDateTime dosBadMicrosecond{2026, 1, 1, 0, 0, 0, 1000000};
+    Require(sceRtcGetDosTime(&dosBadMicrosecond, &dosTime) == invalidMicrosecond && dosTime == 0xbbbbbbbbu);
+    RtcDateTime dosDecoded{};
+    Require(sceRtcSetDosTime(&dosDecoded, 0xffffffffu) == 0 && Equal(dosDecoded, RtcDateTime{2107, 15, 31, 31, 63, 62, 0}));
+    Require(sceRtcSetDosTime(&dosDecoded, 0) == 0 && Equal(dosDecoded, RtcDateTime{1980, 0, 0, 0, 0, 0, 0}));
+    Require(sceRtcSetDosTime(nullptr, 0) == invalidPointer);
 
     Require(sceRtcGetYear(nullptr) == invalidPointer);
     Require(sceRtcSetYear(nullptr, 2024) == invalidPointer);
@@ -762,10 +781,11 @@ int main(int argc, char** argv) {
 
     RtcTick now{};
     Require(sceRtcGetCurrentTick(&now) == 0 && now.tick > leapDayTick);
+    const RtcTick fixed{leapDayTick};
     RtcTick local{};
     RtcTick back{};
-    Require(sceRtcConvertUtcToLocalTime(&now, &local) == 0);
-    Require(sceRtcConvertLocalTimeToUtc(&local, &back) == 0 && back.tick == now.tick);
+    Require(sceRtcConvertUtcToLocalTime(&fixed, &local) == 0);
+    Require(sceRtcConvertLocalTimeToUtc(&local, &back) == 0 && back.tick == fixed.tick);
 
     char rfc2822[32];
     tick.tick = leapDayTick;
