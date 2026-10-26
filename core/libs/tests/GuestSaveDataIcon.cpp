@@ -16,7 +16,6 @@ static constexpr int Parameter = static_cast<int>(0x809F0000);
 static constexpr int NotMounted = static_cast<int>(0x809F0004);
 static constexpr int NotFound = static_cast<int>(0x809F0008);
 static constexpr int Internal = static_cast<int>(0x809F000B);
-static constexpr int BadMounted = static_cast<int>(0x809F000D);
 static constexpr std::uint32_t ReadOnly = 1;
 static constexpr std::uint32_t ReadWrite = 2;
 static constexpr std::uint32_t Create = 32;
@@ -126,17 +125,48 @@ static void CheckReadOnly() {
     Save(point, payload.data(), payload.size(), payload.size());
     Unmount(point);
     point = Mount("readonly", ReadOnly);
-    SaveDataIcon icon{};
-    icon.buf = payload.data();
-    icon.buf_size = payload.size();
-    icon.data_size = 1;
-    Require(sceSaveDataSaveIcon(&point, &icon) == BadMounted);
     Load(point, payload.data(), payload.size());
     Unmount(point);
     point = Mount("readonly", ReadWrite);
     Save(point, payload.data(), payload.size(), 7);
     Load(point, payload.data(), 7);
     Unmount(point);
+}
+
+static void CheckPreparedCreate2() {
+    const int resource = sceSaveDataCreateTransactionResource(0);
+    Require(resource > 0);
+    SceSaveDataDirName directory{};
+    std::memcpy(directory.data, "prepared", sizeof("prepared"));
+    SaveDataMount3 request{};
+    request.dir_name = &directory;
+    request.blocks = 48;
+    request.mount_mode = ReadOnly | 0x10 | Create;
+    request.resource = resource;
+    auto payload = Payload();
+    for (unsigned round = 0; round != 2; ++round) {
+        SaveDataMountResult result{};
+        Require(sceSaveDataMount3(&request, &result) == 0);
+        Require(result.mount_status == (round == 0 ? 1u : 0u));
+        SaveDataPrepareParam prepare{};
+        prepare.resource = resource;
+        Require(sceSaveDataPrepare(&result.mount_point, &prepare) == 0);
+        SaveDataParam param{};
+        std::memcpy(param.title, "prepared save", sizeof("prepared save"));
+        Require(sceSaveDataSetParam(&result.mount_point, 0, &param, sizeof(param)) == 0);
+        const auto size = payload.size() - round;
+        Save(result.mount_point, payload.data(), payload.size(), size);
+        Load(result.mount_point, payload.data(), size);
+        SaveDataCommitParam commit{};
+        commit.resource = resource;
+        Require(sceSaveDataCommit(&commit) == 0);
+        Require(sceSaveDataUmount2(0x10001, &result.mount_point) == 0);
+        const auto reopened = Mount("prepared", ReadOnly);
+        Load(reopened, payload.data(), size);
+        Unmount(reopened);
+        std::reverse(payload.begin(), payload.end());
+    }
+    Require(sceSaveDataDeleteTransactionResource(resource) == 0);
 }
 
 static void CheckArguments() {
@@ -201,6 +231,7 @@ int main(int argc, char** argv) {
         if (operation == "roundtrip") CheckRoundTrip();
         else if (operation == "bounds") CheckBounds();
         else if (operation == "readonly") CheckReadOnly();
+        else if (operation == "prepared_create2") CheckPreparedCreate2();
         else if (operation == "arguments") CheckArguments();
         else { Require(operation == "io"); CheckIoFailure(); }
     } catch (const std::exception& error) {

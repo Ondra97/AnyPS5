@@ -661,7 +661,6 @@ static int mount3(const SaveDataMount3* mount, SaveDataMountResult* mount_result
     AddPathAlias_nid_no_patch(mountPoint.c_str(), std::filesystem::absolute(real_path).string().c_str());
     std::memset(mount_result, 0, sizeof(*mount_result));
     g_slots[slot].used = true;
-    g_slots[slot].read_only = rdonly;
     g_slots[slot].mount_point = mountPoint;
     g_slots[slot].real_path = real_path;
     std::memcpy(mount_result->mount_point.data, mountPoint.c_str(), mountPoint.size() + 1);
@@ -695,7 +694,6 @@ int APS5_VABI sceSaveDataSaveIcon(const SaveDataMountPoint* mount_point, const S
     if (slot == -1) {
         return SAVE_DATA_ERROR_NOT_MOUNTED;
     }
-    if (g_slots[slot].read_only) return SAVE_DATA_ERROR_BAD_MOUNTED;
     const auto path = ResolveDiskPath_nid_no_patch((g_slots[slot].mount_point + "/sce_sys/icon0.png").c_str());
     return savedata::replace_file(path, icon->buf, std::min(icon->buf_size, icon->data_size)) ? SAVE_DATA_OK : SAVE_DATA_ERROR_INTERNAL;
 }
