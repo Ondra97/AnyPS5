@@ -1,5 +1,5 @@
 #include "FontFixture.hpp"
-#include "prx/libSceFreeType/include/GuestFreeType.hpp"
+#include "prx/libSceFreeType/libSceFreeType.hpp"
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
@@ -14,19 +14,6 @@
 #include <vector>
 
 using namespace FreeType;
-
-extern "C" {
-int APS5_VABI FT_Init_FreeType_nid_postfix(void**);
-int APS5_VABI FT_Done_FreeType_nid_postfix(void*);
-int APS5_VABI FT_New_Memory_Face_nid_postfix(void*, const unsigned char*, std::int64_t, std::int64_t, GuestFaceRec**);
-int APS5_VABI FT_Done_Face_nid_postfix(GuestFaceRec*);
-int APS5_VABI FT_Set_Charmap_nid_postfix(GuestFaceRec*, GuestCharMapRec*);
-std::uint32_t APS5_VABI FT_Face_GetCharVariantIndex_nid_postfix(GuestFaceRec*, std::uint64_t, std::uint64_t);
-int APS5_VABI FT_Face_GetCharVariantIsDefault_nid_postfix(GuestFaceRec*, std::uint64_t, std::uint64_t);
-std::uint32_t* APS5_VABI FT_Face_GetVariantSelectors_nid_postfix(GuestFaceRec*);
-std::uint32_t* APS5_VABI FT_Face_GetVariantsOfChar_nid_postfix(GuestFaceRec*, std::uint64_t);
-std::uint32_t* APS5_VABI FT_Face_GetCharsOfVariant_nid_postfix(GuestFaceRec*, std::uint64_t);
-}
 
 static void Check(bool value, int line) {
     if (!value) {
@@ -113,7 +100,7 @@ struct FacePair {
     GuestFaceRec* guest = nullptr;
     FT_Face native = nullptr;
 
-    FacePair(void* library, FT_Library nativeLibrary, std::vector<unsigned char> font) : bytes(std::move(font)) {
+    FacePair(GuestLibrary* library, FT_Library nativeLibrary, std::vector<unsigned char> font) : bytes(std::move(font)) {
         Require(FT_New_Memory_Face_nid_postfix(library, bytes.data(), static_cast<std::int64_t>(bytes.size()), 0, &guest) == 0);
         Require(FT_New_Memory_Face(nativeLibrary, bytes.data(), static_cast<FT_Long>(bytes.size()), 0, &native) == 0);
     }
@@ -174,7 +161,7 @@ static void CompareQueries(GuestFaceRec* guest, FT_Face native, int& scalars, in
 }
 
 int main() {
-    void* library = nullptr;
+    GuestLibrary* library = nullptr;
     FT_Library nativeLibrary = nullptr;
     Require(FT_Init_FreeType_nid_postfix(&library) == 0 && FT_Init_FreeType(&nativeLibrary) == 0);
     int scalars = 0;
