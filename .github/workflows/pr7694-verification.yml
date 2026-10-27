@@ -1,0 +1,62 @@
+name: PR 7694 native Linux guarded descriptor verification
+
+on:
+  push:
+    branches: [codex/verify-pr7694-20261027]
+
+permissions:
+  contents: read
+
+jobs:
+  shader:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fefe7bc97e80948a20f11e715c5e24f92f3b4f16
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++-14 ninja-build nasm pkg-config libx11-dev libxext-dev libxrandr-dev libasound2-dev libpulse-dev libpipewire-0.3-dev libwayland-dev libxkbcommon-dev libegl-dev libdecor-0-dev libudev-dev libdbus-1-dev
+      - name: Record revision and native ABI environment
+        run: |
+          mkdir -p evidence
+          {
+            git rev-parse HEAD
+            uname -a
+            cat /etc/os-release
+            lscpu
+            free -h
+            g++-14 --version
+            cmake --version
+            ninja --version
+            grep -n -E 'sizeof\(DescriptorSource\)|fieldCount<MemoryInfo>|fieldCount<DescriptorSource>' core/shader/recompiler/ShaderDiskCache.cpp
+            grep -n 'FormatVersion =' core/shader/recompiler/ShaderDiskCache.hpp
+            printf 'GPU: none used; CPU shader preparation and SPIR-V validation\n'
+          } | tee evidence/environment.txt
+      - name: Configure SPIRV-Tools build
+        run: |
+          set -o pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 -DANYPS5_ENABLE_SPIRV_TOOLS=ON 2>&1 | tee evidence/configure.log
+          python3 tools/check_test_registration.py build | tee evidence/registration.log
+      - name: Build shader memory and disk cache tests
+        run: |
+          set -o pipefail
+          cmake --build build --target agc_shader_memory_tests agc_shader_disk_cache_tests --parallel 4 2>&1 | tee evidence/build.log
+      - name: Run native Linux regression three times
+        env:
+          APS5_VERIFY_SRT_TAPE: 1
+          APS5_VERIFY_SRT_COMPACT: 1
+        run: |
+          set -o pipefail
+          ctest --test-dir build -R '^agc_shader_(memory|disk_cache)$' -V --output-on-failure --no-tests=error --repeat until-fail:3 --output-junit "$PWD/evidence/tests.xml" 2>&1 | tee evidence/tests.log
+          grep -F 'descriptor Phi: skipped mapped, unmapped and null reads stay null; taken unmapped reads fail' evidence/tests.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pr7694-linux
+          path: evidence/
