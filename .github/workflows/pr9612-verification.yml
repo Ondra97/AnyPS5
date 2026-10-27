@@ -1,0 +1,97 @@
+name: PR 9612 focused Release and ASan
+
+on:
+  push:
+    branches: [codex/verify-pr9612-20261027]
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: Release
+            build_type: Release
+            asan: 'OFF'
+          - mode: ASan
+            build_type: RelWithDebInfo
+            asan: 'ON'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 1a8c22c90dad064a1180522cb656db2e05942666
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++-14 ninja-build nasm pkg-config libx11-dev libxext-dev libxrandr-dev libasound2-dev libpulse-dev libpipewire-0.3-dev libwayland-dev libxkbcommon-dev libegl-dev libdecor-0-dev libudev-dev libdbus-1-dev
+      - name: Record revisions and machine
+        run: |
+          mkdir -p evidence
+          {
+            git rev-parse HEAD
+            git show -s --format='%H %P %s' HEAD
+            uname -a
+            cat /etc/os-release
+            lscpu
+            free -h
+            g++-14 --version
+            cmake --version
+            ninja --version
+            printf 'GPU: none used; CPU fixtures only\n'
+          } | tee evidence/environment.txt
+      - name: Configure full project
+        run: |
+          set -o pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 -DANYPS5_ENABLE_ASAN=${{ matrix.asan }} 2>&1 | tee evidence/configure.log
+          python3 tools/check_test_registration.py build | tee evidence/registration.log
+      - name: Build library and all seven focused tests
+        run: |
+          set -o pipefail
+          cmake --build build --target guest_np_cpp_web_api_intrusive_ptr_tests guest_np_cpp_web_api_string_tests guest_np_cpp_web_api_signed_out_tests guest_np_cpp_web_api_offline_tests --parallel 4 2>&1 | tee evidence/build.log
+      - name: Run registered tests three times
+        run: |
+          set -o pipefail
+          ctest --test-dir build -R '^guest_np_cpp_web_api' -N | tee evidence/inventory.txt
+          ctest --test-dir build -R '^guest_np_cpp_web_api' -V --output-on-failure --no-tests=error --repeat until-fail:3 --output-junit "$PWD/evidence/fixed.xml" 2>&1 | tee evidence/fixed.log
+      - name: Compare main production source with identical tests
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          file=core/libs/prx/libSceNpCppWebApi/Export.cpp
+          cp "$file" "$RUNNER_TEMP/pr9612-fixed.cpp"
+          trap 'cp "$RUNNER_TEMP/pr9612-fixed.cpp" "$file"' EXIT
+          git show 81267b2204e4927ed6387090bb25db619460cdd5:"$file" > "$file"
+          cmake --build build --target libSceNpCppWebApi --parallel 4 > evidence/control-build.log 2>&1
+          for test in alias_append alias_string_vector alias_intrusive_vector; do
+            set +e
+            ctest --test-dir build -R "^guest_np_cpp_web_api_${test}$" -V --output-on-failure --no-tests=error > "evidence/control-${test}.log" 2>&1
+            result=$?
+            set -e
+            printf '%s exit=%s\n' "$test" "$result" | tee -a evidence/control-results.txt
+            if [ "$MODE" = ASan ]; then
+              test "$result" -ne 0
+              if [ "$test" = alias_append ]; then
+                grep -E 'ERROR: AddressSanitizer: (memcpy-param-overlap|heap-use-after-free)' "evidence/control-${test}.log"
+              else
+                grep -F 'ERROR: AddressSanitizer: heap-use-after-free' "evidence/control-${test}.log"
+              fi
+            fi
+          done
+          cp "$RUNNER_TEMP/pr9612-fixed.cpp" "$file"
+          cmake --build build --target libSceNpCppWebApi --parallel 4 > evidence/restored-build.log 2>&1
+          ctest --test-dir build -R '^guest_np_cpp_web_api' -V --output-on-failure --no-tests=error 2>&1 | tee evidence/restored.log
+          git diff --exit-code
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pr9612-${{ matrix.mode }}
+          path: evidence/
