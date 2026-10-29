@@ -283,38 +283,38 @@ private:
 
 class WatchedSurface {
 public:
-    explicit WatchedSurface(const Context& context) : context(context) {
+    explicit WatchedSurface(const Context& context, std::size_t bytes = SurfaceBytes) : context(context), span(bytes) {
 #ifdef _WIN32
-        memory = static_cast<std::uint8_t*>(GuestArena::GuestArenaAllocate_nid_postfix(SurfaceBytes, 65536));
-        if (memory != nullptr) GuestArena::GuestArenaCommit_nid_postfix(memory, SurfaceBytes, PAGE_READWRITE, SurfaceBytes);
+        memory = static_cast<std::uint8_t*>(GuestArena::GuestArenaAllocate_nid_postfix(bytes, 65536));
+        if (memory != nullptr) GuestArena::GuestArenaCommit_nid_postfix(memory, bytes, PAGE_READWRITE, bytes);
 #else
         constexpr std::uintptr_t alignment = 65536;
-        void* mapped = mmap(nullptr, SurfaceBytes + alignment, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        void* mapped = mmap(nullptr, bytes + alignment, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (mapped != MAP_FAILED) {
             const auto begin = reinterpret_cast<std::uintptr_t>(mapped);
             const auto aligned = (begin + alignment - 1) & ~(alignment - 1);
             if (aligned != begin) munmap(mapped, aligned - begin);
-            if (aligned + SurfaceBytes != begin + SurfaceBytes + alignment) munmap(reinterpret_cast<void*>(aligned + SurfaceBytes), begin + alignment - aligned);
+            if (aligned + bytes != begin + bytes + alignment) munmap(reinterpret_cast<void*>(aligned + bytes), begin + alignment - aligned);
             memory = reinterpret_cast<std::uint8_t*>(aligned);
-            GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(memory, SurfaceBytes);
+            GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(memory, bytes);
         }
 #endif
         Require(memory != nullptr, "cannot allocate the watched surface");
-        Require(AgcDriver::GuestMemory::Watched(Address(), SurfaceBytes), "the watched surface is not write-watched");
-        std::memset(memory, 0x5a, SurfaceBytes);
-        GuestAllocations::Mutation().Add(memory, SurfaceBytes, true, true, true);
-        AgcDriver::GuestMemory::CollectWritesUncached(Address(), SurfaceBytes);
+        Require(AgcDriver::GuestMemory::Watched(Address(), bytes), "the watched surface is not write-watched");
+        std::memset(memory, 0x5a, bytes);
+        GuestAllocations::Mutation().Add(memory, bytes, true, true, true);
+        AgcDriver::GuestMemory::CollectWritesUncached(Address(), bytes);
     }
 
     ~WatchedSurface() {
         ClearCachedTextures(context.device);
         GuestAllocations::Mutation().Remove(memory);
 #ifdef _WIN32
-        GuestArena::GuestArenaReset_nid_postfix(memory, SurfaceBytes);
-        GuestArena::GuestArenaRelease_nid_postfix(memory, SurfaceBytes);
+        GuestArena::GuestArenaReset_nid_postfix(memory, span);
+        GuestArena::GuestArenaRelease_nid_postfix(memory, span);
 #else
-        munmap(memory, SurfaceBytes);
-        GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(memory, SurfaceBytes);
+        munmap(memory, span);
+        GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(memory, span);
 #endif
     }
 
@@ -325,6 +325,7 @@ public:
 
 private:
     const Context& context;
+    std::size_t span = 0;
     std::uint8_t* memory = nullptr;
 };
 
@@ -674,6 +675,55 @@ void snapshotTests(const Context& context) {
     Require(TextureCacheUsage().sampledBytes == tiny->AllocationBytes(), "a snapshot whose " + std::to_string(tiny->AllocationBytes()) + "-byte image is smaller than its " + std::to_string(guestBytes) + " guest bytes counted " + std::to_string(TextureCacheUsage().sampledBytes) + " bytes, not its allocation");
 }
 
+void recycleTests(const Context& context) {
+    Block block(context);
+    ClearCachedTextures(context.device);
+    const auto address = block.Surface(0);
+    std::memset(reinterpret_cast<void*>(address), 0xa1, SurfaceBytes);
+    const auto first = Sampled(context, address);
+    Require(Sampled(context, address) == first, "an unchanged surface did not serve its snapshot");
+    std::memset(reinterpret_cast<void*>(address), 0xb2, SurfaceBytes);
+    const auto second = Sampled(context, address);
+    Require(second != first, "a changed surface did not replace its snapshot");
+    std::memset(reinterpret_cast<void*>(address), 0xa1, SurfaceBytes);
+    const auto third = Sampled(context, address);
+    Require(third != second, "the replaced snapshot's size-equal buffer was not reread from guest memory");
+    Require(Sampled(context, address) == third, "an unchanged surface did not serve its remade snapshot");
+    constexpr std::uint32_t BigSide = Side * 2;
+    constexpr std::size_t BigBytes = std::size_t{BigSide} * BigSide * 4u;
+    const WatchedSurface watchedFirst(context, BigBytes);
+    const WatchedSurface watchedSecond(context, BigBytes);
+    const auto bigFirst = Sampled(context, watchedFirst.Address(), BigSide);
+    Require(TextureCacheUsage().spareEntries == 1 && TextureCacheUsage().spareBytes == BigBytes, "the first big snapshot did not park its dropped " + std::to_string(BigBytes) + "-byte buffer in the spare pool");
+    const auto bigSecond = Sampled(context, watchedSecond.Address(), BigSide);
+    Require(TextureCacheUsage().spareEntries == 1 && TextureCacheUsage().spareBytes == BigBytes, "the second big snapshot did not take the parked spare of its size");
+}
+
+void spareAgeTests(const Context& context) {
+    Block block(context);
+    ClearCachedTextures(context.device);
+    constexpr std::uint32_t BigSide = Side * 2;
+    constexpr std::size_t BigBytes = std::size_t{BigSide} * BigSide * 4u;
+    {
+        const WatchedSurface watched(context, BigBytes);
+        const auto first = Sampled(context, watched.Address(), BigSide);
+        Require(TextureCacheUsage().spareEntries == 1 && TextureCacheUsage().spareBytes == BigBytes, "the big snapshot did not park its dropped buffer in the spare pool");
+        for (std::uint64_t present = 0; present <= SpareSnapshotPresents; ++present) Recorder::CountPresent();
+        const auto small = Sampled(context, block.Surface(0));
+        Require(TextureCacheUsage().spareEntries == 0 && TextureCacheUsage().spareBytes == 0, "a spare idle for " + std::to_string(SpareSnapshotPresents + 1u) + " presents was not released");
+    }
+    ClearCachedTextures(context.device);
+    {
+        const WatchedSurface watchedFirst(context, BigBytes);
+        const WatchedSurface watchedSecond(context, BigBytes);
+        const auto second = Sampled(context, watchedFirst.Address(), BigSide);
+        Require(TextureCacheUsage().spareEntries == 1 && TextureCacheUsage().spareBytes == BigBytes, "the second big snapshot did not park its dropped buffer in the spare pool");
+        for (std::uint64_t present = 0; present < SpareSnapshotPresents; ++present) Recorder::CountPresent();
+        const auto third = Sampled(context, watchedSecond.Address(), BigSide);
+        Require(TextureCacheUsage().spareEntries == 1 && TextureCacheUsage().spareBytes == BigBytes, "a spare taken within " + std::to_string(SpareSnapshotPresents) + " presents was released instead of reused");
+    }
+}
+
 void heldTests(const Context& context) {
     Block block(context);
     auto held = Sampled(context, block.Surface(0));
@@ -954,7 +1004,7 @@ std::uint64_t ExpectedBudget(const Context& context) {
     VkPhysicalDeviceMemoryBudgetPropertiesEXT reported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
     VkPhysicalDeviceMemoryProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &reported};
     ReportBudget(context.physical, &properties);
-    return SampledTextureBudget(context.memory, &reported, SampledTextureMemory() + TextureCacheUsage().storageBytes);
+    return SampledTextureBudget(context.memory, &reported, SampledTextureMemory() + TextureCacheUsage().storageBytes, TextureCacheUsage().storageBytes);
 }
 
 std::uint64_t ReadBudget(const Context& context) {
@@ -999,8 +1049,11 @@ void storageMemoryTests(Context context) {
     context.memoryProperties2 = &ReportBudget;
     Block block(context);
     auto held = Sampled(context, block.Surface(0));
-    const auto quarter = std::min<std::uint64_t>(StorageTextureBudget(context.memory, nullptr, 0, 0), ReportedBudget / 4u);
-    Require(ReadStorageBudget(context) == quarter, "52 GiB free of a 64 GiB budget does not leave the storage image cache its quarter");
+    const auto heap = LargestDeviceLocalHeap(context.memory);
+    Require(heap.has_value(), "the device has no device-local heap");
+    context.memory.memoryHeaps[*heap].size = std::max<VkDeviceSize>(context.memory.memoryHeaps[*heap].size, ReportedBudget);
+    const auto half = std::min<std::uint64_t>(context.memory.memoryHeaps[*heap].size / 2u, ReportedBudget / 2u);
+    Require(ReadStorageBudget(context) == half, "52 GiB free of a 64 GiB budget does not leave the storage image cache half of the heap or of the budget");
     context.memoryProperties2 = &ReportPressure;
     const auto pressed = ReadStorageBudget(context);
     const auto expected = GiB + TextureCacheUsage().storageBytes;
@@ -1204,6 +1257,7 @@ int main(int argc, char** argv) {
             std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
             reportedBudgetTests(context);
             snapshotTests(context);
+            recycleTests(context);
             heldTests(context);
             releasedTests(context);
             rescanTests(context);
@@ -1215,6 +1269,7 @@ int main(int argc, char** argv) {
             secondUseTests(context);
             earlyMissTests(context);
             collidingKeyTests(context);
+            spareAgeTests(context);
             ClearCachedTextures(context.device);
         }
         std::puts("sampled texture cache budget tests passed");
