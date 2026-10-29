@@ -3441,7 +3441,7 @@ if(BUILD_TESTING)
         set_tests_properties(agc_driver_array_layer_target_cpu PROPERTIES ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
-    foreach(stencilAttachmentCase IN ITEMS value scissor depth-fail partial-mask)
+    foreach(stencilAttachmentCase IN ITEMS value scissor depth-fail partial-mask feature-refusal)
         string(REPLACE "-" "_" stencilAttachmentName "agc_driver_stencil_attachment_${stencilAttachmentCase}")
         add_test(NAME ${stencilAttachmentName} COMMAND agc_driver_stencil_ref_export_unused_tests --case "attachment-${stencilAttachmentCase}")
         set_tests_properties(${stencilAttachmentName} PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 TIMEOUT 30)
