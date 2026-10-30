@@ -57,6 +57,13 @@ static int InitCases(bool withExistingContext) {
         rejectedCases += rejected;
         if (rejected) {
             if (withExistingContext) {
+                HttpMemoryPoolStats pool{};
+                int netPool = -1;
+                int sslContext = -1;
+                Require(sceHttpGetMemoryPoolStats(existing + 1, &pool) == ERROR_INVALID_ID, "failed init retained its pool-size registration");
+                Require(sceHttpGetRegisteredCtxIds(existing + 1, &netPool, &sslContext) == ERROR_INVALID_ID, "failed init retained its registered context ids");
+                Require(sceHttpGetMemoryPoolStats(existing, &pool) == 0 && pool.poolSize == 0x10000, "failed init damaged existing pool stats");
+                Require(sceHttpGetRegisteredCtxIds(existing, &netPool, &sslContext) == 0 && netPool == 0 && sslContext == 0, "failed init damaged existing registered ids");
                 Require(sceHttpAuthCacheFlush(existing) == 0, "failed init damaged an existing context");
                 Require(sceHttpTerm_nid_postfix(existing) == 0, "existing context cleanup failed");
             }
