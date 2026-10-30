@@ -1,5 +1,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libSceHttp/include/Http.hpp"
 #include "prx/libSceHttp/src/HttpErrors.hpp"
 #include <array>
 #include <cstddef>
@@ -8,16 +9,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
-
-extern "C" {
-int APS5_VABI sceHttpInit_nid_postfix(int, int, std::uint64_t);
-int APS5_VABI sceHttpTerm_nid_postfix(int);
-int APS5_VABI sceHttpAuthCacheFlush(int);
-int APS5_VABI sceHttpGetNonblock(int, int*);
-int APS5_VABI sceHttpCreateEpoll(int, HttpEpollHandle*);
-int APS5_VABI sceHttpDestroyEpoll(int, HttpEpollHandle);
-int APS5_VABI sceHttpWaitRequest(HttpEpollHandle, HttpNBEvent*, int, int);
-}
 
 static int allocationBudget = -1;
 static unsigned allocationAttempts = 0;
