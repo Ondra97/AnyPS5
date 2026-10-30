@@ -9784,6 +9784,10 @@ int main(int argc, char** argv) {
             std::cout << "TYPE=0 image descriptor materialization passed\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--descriptor-phis") {
+            verifyDescriptorPhis();
+            return 0;
+        }
         require(argc == 1, "unknown shader memory test arguments");
         verifyRegisterSources();
         verifyEvaluatedValues();
