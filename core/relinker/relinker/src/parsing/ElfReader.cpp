@@ -309,6 +309,28 @@ std::vector<DynamicTag> ElfReader::ReadDynamicTags(const ProgramHeader& dynamicH
             return tags;
         }
 
+        if ((tag.Tag == DT_SYMENT || tag.Tag == DT_OS_SYMENT) && tag.Value != 24) {
+            throw RelinkerException("Unsupported DT_SYMENT value: " + std::to_string(tag.Value) + "; expected 24 bytes", offset);
+        }
+        if ((tag.Tag == DT_RELAENT || tag.Tag == DT_OS_RELAENT) && tag.Value != 24) {
+            throw RelinkerException("Unsupported DT_RELAENT value: " + std::to_string(tag.Value) + "; expected 24 bytes", offset);
+        }
+        if (tag.Tag == DT_RELENT && tag.Value != 16) {
+            throw RelinkerException("Unsupported DT_RELENT value: " + std::to_string(tag.Value) + "; expected 16 bytes", offset);
+        }
+        if ((tag.Tag == DT_PLTREL || tag.Tag == DT_OS_PLTREL) && tag.Value != 7 && tag.Value != 17) {
+            throw RelinkerException("Unsupported DT_PLTREL type: " + std::to_string(tag.Value) + "; expected DT_RELA (7) or DT_REL (17)", offset);
+        }
+        if ((tag.Tag == DT_RELASZ || tag.Tag == DT_OS_RELASZ) && tag.Value % 24 != 0) {
+            throw RelinkerException("Invalid DT_RELASZ value: " + std::to_string(tag.Value) + " bytes; expected a multiple of 24 bytes", offset);
+        }
+        if ((tag.Tag == DT_PLTRELSZ || tag.Tag == DT_OS_PLTRELSZ) && tag.Value % 24 != 0) {
+            throw RelinkerException("Invalid DT_PLTRELSZ value: " + std::to_string(tag.Value) + " bytes; expected a multiple of 24 bytes", offset);
+        }
+        if (tag.Tag == DT_RELSZ && tag.Value % 16 != 0) {
+            throw RelinkerException("Invalid DT_RELSZ value: " + std::to_string(tag.Value) + " bytes; expected a multiple of 16 bytes", offset);
+        }
+
         tags.push_back(tag);
         offset += 16;
     }
