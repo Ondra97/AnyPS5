@@ -143,7 +143,11 @@ std::vector<ProgramHeader> ElfReader::ReadProgramHeaders() const {
         ph.PhysicalAddress = _readU64At(offset + 0x18);
         ph.FileSize = _readU64At(offset + 0x20);
         ph.MemorySize = _readU64At(offset + 0x28);
-        ph.Alignment = _readU64At(offset + 0x30);
+        ph.Alignment = _readU64At(offset + kPhdrAlignOffset);
+
+        if (ph.Alignment > 1 && !std::has_single_bit(ph.Alignment)) {
+            throw RelinkerException("Program header alignment is not a power of two", offset + kPhdrAlignOffset);
+        }
 
         if (ph.Type == PT_LOAD && ph.FileSize > ph.MemorySize)
             throw RelinkerException("PT_LOAD file size exceeds memory size", ph.Offset);
