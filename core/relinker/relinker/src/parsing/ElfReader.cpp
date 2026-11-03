@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <string>
 #include <utility>
 
 namespace Relinker {
@@ -224,8 +225,25 @@ std::vector<SectionHeader> ElfReader::ReadSectionHeaders() const {
         sh.Info = _readU32At(offset + 0x2c);
         sh.EntrySize = _readU64At(offset + kShdrEntSizeOffset);
 
-        if (sh.Type == SHT_SYMTAB && sh.EntrySize != kSymEntrySize) {
+        if (sh.Link >= header.SectionHeaderCount) {
+            throw RelinkerException("Section link index out of bounds", offset + 0x28);
+        }
+
+        const std::uint64_t alignment = _readU64At(offset + kShdrAlignOffset);
+        if (sh.Type != SHT_NULL && alignment > 1 && !std::has_single_bit(alignment)) {
+            throw RelinkerException("Section header alignment is not a power of two", offset + kShdrAlignOffset);
+        }
+
+        if ((sh.Type == SHT_SYMTAB || sh.Type == SHT_DYNSYM) && sh.EntrySize != kSymEntrySize) {
             throw RelinkerException("Invalid symbol table entry size", offset + kShdrEntSizeOffset);
+        }
+
+        if (sh.Type == SHT_RELA && sh.EntrySize != kRelaEntrySize) {
+            throw RelinkerException("Invalid relocation entry size", offset + kShdrEntSizeOffset);
+        }
+
+        if (sh.Type == SHT_REL && sh.EntrySize != 16) {
+            throw RelinkerException("Invalid relocation entry size", offset + kShdrEntSizeOffset);
         }
 
         if (sh.Type != SHT_NULL && sh.Type != SHT_NOBITS && sh.SectionSize != 0) {
