@@ -118,6 +118,34 @@ void RejectDynamicTags(Bytes bytes, const Relinker::ProgramHeader& header) {
     throw std::runtime_error("Invalid dynamic segment was accepted");
 }
 
+void RejectHeader(Bytes bytes, const std::string& expectedMessage = "", const std::uint64_t expectedOffset = std::numeric_limits<std::uint64_t>::max()) {
+    try {
+        Relinker::ElfReader(std::move(bytes)).ReadHeader();
+    } catch (const Relinker::RelinkerException& error) {
+        if (!expectedMessage.empty()) {
+            Require(std::string(error.what()).find(expectedMessage) != std::string::npos);
+        }
+        if (expectedOffset != std::numeric_limits<std::uint64_t>::max()) {
+            Require(error.FailureOffset == expectedOffset);
+        }
+        return;
+    }
+    throw std::runtime_error("Invalid ELF header was accepted");
+}
+
+void RejectMagic(Bytes bytes, const std::string& expectedMessage = "") {
+    try {
+        Relinker::ElfReader(std::move(bytes)).ValidateMagic();
+    } catch (const Relinker::RelinkerException& error) {
+        if (!expectedMessage.empty()) {
+            Require(std::string(error.what()).find(expectedMessage) != std::string::npos);
+        }
+        return;
+    }
+    throw std::runtime_error("Invalid ELF magic was accepted");
+}
+
+
 Bytes DynamicFixture(const std::vector<std::pair<std::int64_t, std::uint64_t>>& tags) {
     Bytes bytes(0x100 + tags.size() * 16);
     const std::uint8_t magic[] = {0x7f, 'E', 'L', 'F', 2, 1, 1};
@@ -560,6 +588,109 @@ int main() {
                 RejectDynamicTags(DynamicFixture(tags), DynamicHeader(tags.size()));
             }
         }},
+        {"file smaller than ELF header size", [] {
+            for (const std::size_t size : {0ULL, 1ULL, 16ULL, 32ULL, 63ULL}) {
+                Bytes bytes(size);
+                RejectHeader(bytes, "File too small for ELF header");
+                RejectMagic(std::move(bytes), "File too small for ELF header");
+            }
+        }},
+        {"SELF container magic rejection", [] {
+            for (const std::uint32_t magic : {0x1d3d154fu, 0xeef51454u}) {
+                auto bytes = Fixture();
+                Write<std::uint32_t>(bytes, 0, magic);
+                RejectHeader(bytes, "The input is a SELF container, not an ELF");
+                RejectMagic(std::move(bytes), "The input is a SELF container, not an ELF");
+            }
+        }},
+        {"invalid ELF magic number", [] {
+            for (const auto& magic : {
+                std::vector<std::uint8_t>{0x00, 'E', 'L', 'F'},
+                std::vector<std::uint8_t>{0x7f, 'e', 'l', 'f'},
+                std::vector<std::uint8_t>{0x7f, 'A', 'B', 'C'},
+                std::vector<std::uint8_t>{'B', 'O', 'Y', 'K'}
+            }) {
+                auto bytes = Fixture();
+                std::memcpy(bytes.data(), magic.data(), 4);
+                RejectHeader(bytes, "Invalid ELF magic number");
+                RejectMagic(std::move(bytes), "Invalid ELF magic number");
+            }
+        }},
+        {"invalid ELF class", [] {
+            for (const std::uint8_t cls : {0u, 1u, 3u, 255u}) {
+                auto bytes = Fixture();
+                bytes[4] = cls;
+                RejectHeader(std::move(bytes), "Expected little-endian ELF64 version 1");
+            }
+        }},
+        {"invalid ELF data encoding", [] {
+            for (const std::uint8_t encoding : {0u, 2u, 3u, 255u}) {
+                auto bytes = Fixture();
+                bytes[5] = encoding;
+                RejectHeader(std::move(bytes), "Expected little-endian ELF64 version 1");
+            }
+        }},
+        {"invalid ELF version in ident", [] {
+            for (const std::uint8_t version : {0u, 2u, 3u, 255u}) {
+                auto bytes = Fixture();
+                bytes[6] = version;
+                RejectHeader(std::move(bytes), "Expected little-endian ELF64 version 1");
+            }
+        }},
+        {"invalid ELF machine", [] {
+            for (const std::uint16_t machine : {0u, 3u, 40u, 61u, 63u, 183u, 0xffffu}) {
+                auto bytes = Fixture();
+                Write<std::uint16_t>(bytes, 0x12, machine);
+                RejectHeader(std::move(bytes), "Expected an x86-64 ELF");
+            }
+        }},
+        {"unsupported ELF object version", [] {
+            for (const std::uint32_t version : {0u, 2u, 3u, 0xffffffffu}) {
+                auto bytes = Fixture();
+                Write<std::uint32_t>(bytes, 0x14, version);
+                RejectHeader(std::move(bytes), "Unsupported ELF object version: expected 1", 0x14);
+            }
+        }},
+        {"invalid ELF header size", [] {
+            for (const std::uint16_t size : {0u, 52u, 60u, 63u, 65u, 128u, 0xffffu}) {
+                auto bytes = Fixture();
+                Write<std::uint16_t>(bytes, 0x34, size);
+                RejectHeader(std::move(bytes), "Invalid ELF header size: expected 64 bytes", 0x34);
+            }
+        }},
+        {"ELF program header entry size mismatch", [] {
+            for (const std::uint16_t entrySize : {0u, 48u, 55u, 57u, 64u, 0xffffu}) {
+                auto bytes = Fixture();
+                Write<std::uint16_t>(bytes, 0x36, entrySize);
+                RejectProgramHeaders(std::move(bytes), "Invalid ELF program header entry size: expected 56 bytes", 0x36);
+            }
+        }},
+        {"valid ELF header fields", [] {
+            const auto header = Relinker::ElfReader(Fixture()).ReadHeader();
+            Require(header.Machine == 62);
+            Require(header.Type == 3);
+            Require(header.ProgramHeaderEntrySize == 56);
+            Require(header.ProgramHeaderCount == 1);
+            Require(header.SectionHeaderEntrySize == 64);
+            Require(header.SectionHeaderCount == 3);
+            Require(header.SectionHeaderStringIndex == 2);
+        }},
+        {"program header alignment is not a power of two", [] {
+            for (const std::uint64_t align : {3ULL, 5ULL, 7ULL, 0x3000ULL, 0xfffffffffffffffbULL}) {
+                auto bytes = Fixture();
+                Write<std::uint64_t>(bytes, 64 + 48, align);
+                RejectProgramHeaders(std::move(bytes), "Program header alignment is not a power of two", 64 + 48);
+            }
+        }},
+        {"valid program header alignment powers of two", [] {
+            for (const std::uint64_t align : {0ULL, 1ULL, 2ULL, 4ULL, 8ULL, 16ULL, 0x1000ULL, 0x4000ULL, 0x10000ULL}) {
+                auto bytes = Fixture();
+                Write<std::uint64_t>(bytes, 64 + 48, align);
+                const auto headers = Relinker::ElfReader(std::move(bytes)).ReadProgramHeaders();
+                Require(headers.size() == 1 && headers[0].Alignment == align);
+            }
+        }},
+
     };
     std::size_t failures = 0;
     for (const auto& [name, test] : cases) {
