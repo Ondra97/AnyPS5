@@ -76,10 +76,12 @@ void Require(const bool condition) {
     if (!condition) throw std::runtime_error("Unexpected parsed value");
 }
 
-void RejectSections(Bytes bytes) {
+void RejectSections(Bytes bytes, const std::string& expectedMessage = "", const std::uint64_t expectedOffset = std::numeric_limits<std::uint64_t>::max()) {
     try {
         Relinker::ElfReader(std::move(bytes)).ReadSectionHeaders();
-    } catch (const Relinker::RelinkerException&) {
+    } catch (const Relinker::RelinkerException& error) {
+        if (!expectedMessage.empty()) Require(error.what() == expectedMessage);
+        if (expectedOffset != std::numeric_limits<std::uint64_t>::max()) Require(error.FailureOffset == expectedOffset);
         return;
     }
     throw std::runtime_error("Invalid section metadata was accepted");
@@ -107,15 +109,6 @@ void RejectProgramHeaders(Bytes bytes, const std::string& expectedMessage = "", 
         return;
     }
     throw std::runtime_error("Invalid program header was accepted");
-}
-
-void RejectDynamicTags(Bytes bytes, const Relinker::ProgramHeader& header) {
-    try {
-        Relinker::ElfReader(std::move(bytes)).ReadDynamicTags(header);
-    } catch (const Relinker::RelinkerException&) {
-        return;
-    }
-    throw std::runtime_error("Invalid dynamic segment was accepted");
 }
 
 void RejectHeader(Bytes bytes, const std::string& expectedMessage = "", const std::uint64_t expectedOffset = std::numeric_limits<std::uint64_t>::max()) {
@@ -255,7 +248,7 @@ int main() {
             RejectProgramHeaders(TlsFixture(0x1008, 16, 8, 8));
         }},
         {"TLS alignment is not a power of two", [] {
-            RejectProgramHeaders(TlsFixture(0x1008, 8, 8, 3));
+            RejectProgramHeaders(TlsFixture(0x1008, 8, 8, 3), "Invalid or unsupported ELF TLS layout", 0x248);
         }},
         {"second TLS segment", [] {
             auto bytes = TlsFixture(0x1008, 8, 16, 8);
@@ -467,18 +460,29 @@ int main() {
             Require(reader.TranslateVirtualAddress(0x101f) == 0x25f);
             RejectAddress(Fixture(), 0x1020);
         }},
-        {"sh_link section header index out of bounds", [] {
-            auto bytes = Fixture();
-            Write<std::uint32_t>(bytes, 196, 2);
-            Write<std::uint32_t>(bytes, 232, 3);
-            Write<std::uint32_t>(bytes, 192, 21);
-            RejectSections(std::move(bytes));
+        {"sh_link section header index bounds", [] {
+            for (const std::uint32_t type : {Elfpatcher::SHT_SYMTAB, Elfpatcher::SHT_DYNSYM, Elfpatcher::SHT_RELA, Elfpatcher::SHT_REL, Elfpatcher::SHT_DYNAMIC}) {
+                for (const std::uint32_t link : {0u, 2u, 3u, 0xffffffffu}) {
+                    auto bytes = Fixture();
+                    Write(bytes, 196, type);
+                    Write<std::uint64_t>(bytes, 248, type == Elfpatcher::SHT_REL ? 16 : 24);
+                    Write(bytes, 232, link);
+                    if (link < 3) {
+                        const auto sections = Relinker::ElfReader(std::move(bytes)).ReadSectionHeaders();
+                        Require(sections.size() == 3 && sections[1].Name == ".text" && sections[1].Link == link);
+                    } else {
+                        RejectSections(std::move(bytes), "Section link index out of bounds", 232);
+                    }
+                }
+            }
         }},
-        {"section header alignment is not a power of two", [] {
-            for (const std::uint64_t align : {3ULL, 5ULL, 7ULL, 0x3000ULL, 0xfffffffffffffffbULL}) {
+        {"unused section link fields are preserved", [] {
+            for (const std::uint32_t type : {Elfpatcher::SHT_NULL, Elfpatcher::SHT_PROGBITS, Elfpatcher::SHT_STRTAB, Elfpatcher::SHT_NOBITS, 0x70000000u}) {
                 auto bytes = Fixture();
-                Write<std::uint64_t>(bytes, 240, align);
-                RejectSections(std::move(bytes));
+                Write(bytes, 196, type);
+                Write<std::uint32_t>(bytes, 232, 0xffffffffu);
+                const auto sections = Relinker::ElfReader(std::move(bytes)).ReadSectionHeaders();
+                Require(sections.size() == 3 && sections[1].Link == 0xffffffffu);
             }
         }},
         {"SHT_DYNSYM section entry size mismatch", [] {
@@ -505,87 +509,20 @@ int main() {
                 RejectSections(std::move(bytes));
             }
         }},
-        {"DT_SYMENT and DT_OS_SYMENT dynamic size mismatch", [] {
-            for (const std::int64_t tag : {Elfpatcher::DT_SYMENT, Elfpatcher::DT_OS_SYMENT}) {
-                for (const std::uint64_t size : {0ULL, 1ULL, 8ULL, 16ULL, 20ULL, 23ULL, 25ULL, 32ULL}) {
-                    const std::vector<std::pair<std::int64_t, std::uint64_t>> tags = {
-                        {tag, size},
-                        {0, 0}
-                    };
-                    RejectDynamicTags(DynamicFixture(tags), DynamicHeader(tags.size()));
-                }
-            }
-        }},
-        {"valid DT_SYMENT and DT_OS_SYMENT dynamic size", [] {
-            for (const std::int64_t tag : {Elfpatcher::DT_SYMENT, Elfpatcher::DT_OS_SYMENT}) {
-                const std::vector<std::pair<std::int64_t, std::uint64_t>> tags = {
-                    {tag, 24},
-                    {0, 0}
-                };
-                const auto parsed = Relinker::ElfReader(DynamicFixture(tags)).ReadDynamicTags(DynamicHeader(tags.size()));
-                Require(parsed.size() == 1 && parsed[0].Tag == tag && parsed[0].Value == 24);
-            }
-        }},
-        {"DT_RELAENT and DT_OS_RELAENT dynamic entry size mismatch", [] {
-            for (const std::int64_t tag : {Elfpatcher::DT_RELAENT, Elfpatcher::DT_OS_RELAENT}) {
-                for (const std::uint64_t size : {0ULL, 1ULL, 16ULL, 20ULL, 23ULL, 25ULL, 32ULL}) {
-                    const std::vector<std::pair<std::int64_t, std::uint64_t>> tags = {
-                        {tag, size},
-                        {0, 0}
-                    };
-                    RejectDynamicTags(DynamicFixture(tags), DynamicHeader(tags.size()));
-                }
-            }
-        }},
-        {"DT_RELENT dynamic entry size mismatch", [] {
-            for (const std::uint64_t size : {0ULL, 1ULL, 8ULL, 12ULL, 15ULL, 17ULL, 24ULL}) {
-                const std::vector<std::pair<std::int64_t, std::uint64_t>> tags = {
-                    {Elfpatcher::DT_RELENT, size},
-                    {0, 0}
-                };
-                RejectDynamicTags(DynamicFixture(tags), DynamicHeader(tags.size()));
-            }
-        }},
-        {"unsupported DT_PLTREL and DT_OS_PLTREL type", [] {
-            for (const std::int64_t tag : {Elfpatcher::DT_PLTREL, Elfpatcher::DT_OS_PLTREL}) {
-                for (const std::uint64_t type : {0ULL, 1ULL, 2ULL, 8ULL, 20ULL}) {
-                    const std::vector<std::pair<std::int64_t, std::uint64_t>> tags = {
-                        {tag, type},
-                        {0, 0}
-                    };
-                    RejectDynamicTags(DynamicFixture(tags), DynamicHeader(tags.size()));
-                }
-            }
-        }},
-        {"unaligned DT_RELASZ and DT_OS_RELASZ size", [] {
-            for (const std::int64_t tag : {Elfpatcher::DT_RELASZ, Elfpatcher::DT_OS_RELASZ}) {
-                for (const std::uint64_t size : {1ULL, 12ULL, 23ULL, 25ULL, 35ULL, 47ULL}) {
-                    const std::vector<std::pair<std::int64_t, std::uint64_t>> tags = {
-                        {tag, size},
-                        {0, 0}
-                    };
-                    RejectDynamicTags(DynamicFixture(tags), DynamicHeader(tags.size()));
-                }
-            }
-        }},
-        {"unaligned DT_PLTRELSZ and DT_OS_PLTRELSZ size", [] {
-            for (const std::int64_t tag : {Elfpatcher::DT_PLTRELSZ, Elfpatcher::DT_OS_PLTRELSZ}) {
-                for (const std::uint64_t size : {1ULL, 12ULL, 23ULL, 25ULL, 35ULL, 47ULL}) {
-                    const std::vector<std::pair<std::int64_t, std::uint64_t>> tags = {
-                        {tag, size},
-                        {0, 0}
-                    };
-                    RejectDynamicTags(DynamicFixture(tags), DynamicHeader(tags.size()));
-                }
-            }
-        }},
-        {"unaligned DT_RELSZ size", [] {
-            for (const std::uint64_t size : {1ULL, 8ULL, 15ULL, 17ULL, 31ULL}) {
-                const std::vector<std::pair<std::int64_t, std::uint64_t>> tags = {
-                    {Elfpatcher::DT_RELSZ, size},
-                    {0, 0}
-                };
-                RejectDynamicTags(DynamicFixture(tags), DynamicHeader(tags.size()));
+        {"dynamic tag values are preserved for semantic validation", [] {
+            const std::vector<std::pair<std::int64_t, std::uint64_t>> tags = {
+                {Elfpatcher::DT_SYMENT, 8}, {Elfpatcher::DT_OS_SYMENT, 16},
+                {Elfpatcher::DT_RELAENT, 0}, {Elfpatcher::DT_OS_RELAENT, 32},
+                {Elfpatcher::DT_RELASZ, 1}, {Elfpatcher::DT_OS_RELASZ, 25},
+                {Elfpatcher::DT_PLTRELSZ, 23}, {Elfpatcher::DT_OS_PLTRELSZ, 47},
+                {Elfpatcher::DT_PLTREL, 17}, {Elfpatcher::DT_OS_PLTREL, 0},
+                {Elfpatcher::DT_REL, 0}, {Elfpatcher::DT_RELSZ, 24}, {Elfpatcher::DT_RELENT, 1},
+                {0, 0}
+            };
+            const auto parsed = Relinker::ElfReader(DynamicFixture(tags)).ReadDynamicTags(DynamicHeader(tags.size()));
+            Require(parsed.size() == tags.size() - 1);
+            for (std::size_t index = 0; index < parsed.size(); ++index) {
+                Require(parsed[index].Tag == tags[index].first && parsed[index].Value == tags[index].second);
             }
         }},
         {"file smaller than ELF header size", [] {
@@ -675,12 +612,16 @@ int main() {
             Require(header.SectionHeaderCount == 3);
             Require(header.SectionHeaderStringIndex == 2);
         }},
-        {"program header alignment is not a power of two", [] {
-            for (const std::uint64_t align : {3ULL, 5ULL, 7ULL, 0x3000ULL, 0xfffffffffffffffbULL}) {
-                auto bytes = Fixture();
-                Write<std::uint64_t>(bytes, 64 + 48, align);
-                RejectProgramHeaders(std::move(bytes), "Program header alignment is not a power of two", 64 + 48);
+        {"PT_NULL ignores unused program header fields", [] {
+            auto bytes = Fixture();
+            Write<std::uint32_t>(bytes, 64, 0);
+            Write<std::uint32_t>(bytes, 68, 0xffffffffu);
+            for (const std::size_t offset : {72u, 80u, 88u, 96u, 104u, 112u}) {
+                Write<std::uint64_t>(bytes, offset, std::numeric_limits<std::uint64_t>::max());
             }
+            const auto headers = Relinker::ElfReader(std::move(bytes)).ReadProgramHeaders();
+            Require(headers.size() == 1 && headers[0].Type == 0);
+            Require(headers[0].Alignment == std::numeric_limits<std::uint64_t>::max());
         }},
         {"valid program header alignment powers of two", [] {
             for (const std::uint64_t align : {0ULL, 1ULL, 2ULL, 4ULL, 8ULL, 16ULL, 0x1000ULL, 0x4000ULL, 0x10000ULL}) {

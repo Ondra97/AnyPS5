@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
-#include <string>
 #include <utility>
 
 namespace Relinker {
@@ -145,10 +144,6 @@ std::vector<ProgramHeader> ElfReader::ReadProgramHeaders() const {
         ph.MemorySize = _readU64At(offset + 0x28);
         ph.Alignment = _readU64At(offset + kPhdrAlignOffset);
 
-        if (ph.Alignment > 1 && !std::has_single_bit(ph.Alignment)) {
-            throw RelinkerException("Program header alignment is not a power of two", offset + kPhdrAlignOffset);
-        }
-
         if (ph.Type == PT_LOAD && ph.FileSize > ph.MemorySize)
             throw RelinkerException("PT_LOAD file size exceeds memory size", ph.Offset);
         if (ph.Type == PT_LOAD && !_rangeFits(ph.Offset, ph.FileSize, _fileBuffer.size()))
@@ -229,13 +224,9 @@ std::vector<SectionHeader> ElfReader::ReadSectionHeaders() const {
         sh.Info = _readU32At(offset + 0x2c);
         sh.EntrySize = _readU64At(offset + kShdrEntSizeOffset);
 
-        if (sh.Link >= header.SectionHeaderCount) {
-            throw RelinkerException("Section link index out of bounds", offset + 0x28);
-        }
-
-        const std::uint64_t alignment = _readU64At(offset + kShdrAlignOffset);
-        if (sh.Type != SHT_NULL && alignment > 1 && !std::has_single_bit(alignment)) {
-            throw RelinkerException("Section header alignment is not a power of two", offset + kShdrAlignOffset);
+        if ((sh.Type == SHT_SYMTAB || sh.Type == SHT_DYNSYM || sh.Type == SHT_RELA || sh.Type == SHT_REL || sh.Type == SHT_DYNAMIC)
+            && sh.Link >= header.SectionHeaderCount) {
+            throw RelinkerException("Section link index out of bounds", offset + kShdrLinkOffset);
         }
 
         if ((sh.Type == SHT_SYMTAB || sh.Type == SHT_DYNSYM) && sh.EntrySize != kSymEntrySize) {
@@ -311,28 +302,6 @@ std::vector<DynamicTag> ElfReader::ReadDynamicTags(const ProgramHeader& dynamicH
 
         if (tag.Tag == 0) {
             return tags;
-        }
-
-        if ((tag.Tag == DT_SYMENT || tag.Tag == DT_OS_SYMENT) && tag.Value != 24) {
-            throw RelinkerException("Unsupported DT_SYMENT value: " + std::to_string(tag.Value) + "; expected 24 bytes", offset);
-        }
-        if ((tag.Tag == DT_RELAENT || tag.Tag == DT_OS_RELAENT) && tag.Value != 24) {
-            throw RelinkerException("Unsupported DT_RELAENT value: " + std::to_string(tag.Value) + "; expected 24 bytes", offset);
-        }
-        if (tag.Tag == DT_RELENT && tag.Value != 16) {
-            throw RelinkerException("Unsupported DT_RELENT value: " + std::to_string(tag.Value) + "; expected 16 bytes", offset);
-        }
-        if ((tag.Tag == DT_PLTREL || tag.Tag == DT_OS_PLTREL) && tag.Value != 7 && tag.Value != 17) {
-            throw RelinkerException("Unsupported DT_PLTREL type: " + std::to_string(tag.Value) + "; expected DT_RELA (7) or DT_REL (17)", offset);
-        }
-        if ((tag.Tag == DT_RELASZ || tag.Tag == DT_OS_RELASZ) && tag.Value % 24 != 0) {
-            throw RelinkerException("Invalid DT_RELASZ value: " + std::to_string(tag.Value) + " bytes; expected a multiple of 24 bytes", offset);
-        }
-        if ((tag.Tag == DT_PLTRELSZ || tag.Tag == DT_OS_PLTRELSZ) && tag.Value % 24 != 0) {
-            throw RelinkerException("Invalid DT_PLTRELSZ value: " + std::to_string(tag.Value) + " bytes; expected a multiple of 24 bytes", offset);
-        }
-        if (tag.Tag == DT_RELSZ && tag.Value % 16 != 0) {
-            throw RelinkerException("Invalid DT_RELSZ value: " + std::to_string(tag.Value) + " bytes; expected a multiple of 16 bytes", offset);
         }
 
         tags.push_back(tag);
