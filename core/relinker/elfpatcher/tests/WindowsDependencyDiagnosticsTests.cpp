@@ -13,6 +13,7 @@
 #include <iostream>
 #include <random>
 #include <stdexcept>
+#include <string_view>
 
 namespace {
 
@@ -239,9 +240,18 @@ void expectDiagnostic(const Fs::path& runner, const std::vector<std::string>& ex
 
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
-        checkRuntimeDependencies();
+        if (argc > 2)
+            throw std::runtime_error("Expected at most one diagnostic scenario");
+        const std::string_view scenario = argc == 2 ? argv[1] : "all";
+        if (scenario == "all" || scenario == "runtime_dependencies") {
+            checkRuntimeDependencies();
+            if (scenario == "runtime_dependencies") {
+                std::cout << "Windows runtime dependency tests passed\n";
+                return 0;
+            }
+        }
         std::vector<wchar_t> filename(32768);
         const auto size = GetModuleFileNameW(nullptr, filename.data(), static_cast<DWORD>(filename.size()));
         if (size == 0 || size >= filename.size())
@@ -251,58 +261,123 @@ int main() {
         const auto middle = directory / "diagnostic-middle.dll";
         const auto leaf = directory / "diagnostic-leaf.dll";
         const auto runner = directory / "diagnostic-runner.exe";
-        createRunner(runner, root);
-        createImage(root, {{middle.filename().string(), "Middle"}}, {});
-        createImage(middle, {{leaf.filename().string(), "Missing"}}, "Middle");
-        createImage(leaf, {}, "Present");
-        expectDiagnostic(runner, {"Importer: " + middle.string(), "Provider: " + leaf.string(), "Symbol: Missing", runner.string() + " -> " + root.string() + " -> " + middle.string() + " -> " + leaf.string()});
-        createImage(middle, {{leaf.filename().string(), "#8"}}, "Middle");
-        expectDiagnostic(runner, {"Symbol: #8"});
-        createImage(middle, {{leaf.filename().string(), "#7"}}, "Middle");
-        expectDiagnostic(runner, {"Dependency tables contain no missing imports"});
-        createImage(middle, {}, "Middle", "diagnostic-leaf.Missing");
-        expectDiagnostic(runner, {"Symbol: Missing", "Importer: " + middle.string()});
-        createImage(middle, {}, "Middle", "diagnostic-leaf.#7");
-        expectDiagnostic(runner, {"Dependency tables contain no missing imports"});
-        createImage(leaf, {}, "Present", "diagnostic-middle.Middle");
-        expectDiagnostic(runner, {"capacity exceeded"});
-        createImage(middle, {{leaf.filename().string(), "Present"}}, "Middle");
-        createImage(leaf, {{middle.filename().string(), "Middle"}}, "Present");
-        expectDiagnostic(runner, {"Dependency tables contain no missing imports"});
-        createImage(leaf, {{middle.filename().string(), "MissingInCycle"}}, "Present");
-        expectDiagnostic(runner, {"Symbol: MissingInCycle", "Importer: " + leaf.string()});
-        createImage(root, {{"diagnostic-absent.dll", "Missing"}}, {});
-        expectDiagnostic(runner, {"dependency module not found", "Importer: " + root.string()});
-        createImage(root, {{"api-ms-win-core-relinkerdiagnostics-l1-1-0.dll", "Missing"}}, {});
-        expectDiagnostic(runner, {"dependency module not found: api-ms-win-core-relinkerdiagnostics-l1-1-0.dll", "Importer: " + root.string(), runner.string() + " -> " + root.string() + " -> api-ms-win-core-relinkerdiagnostics-l1-1-0.dll"});
-        createImage(root, {{"KERNEL32.dll", "CreateRemoteThreadEx"}}, {});
-        expectDiagnostic(runner, {"Dependency tables contain no missing imports"});
-        createImage(root, {{"KERNEL32.dll", "RelinkerDiagnosticsMissingExport"}}, {});
-        expectDiagnostic(runner, {"Symbol: RelinkerDiagnosticsMissingExport"});
-        {
-            std::fstream corrupt;
-            openFixture(corrupt, root, std::ios::binary | std::ios::in | std::ios::out);
-            const std::array<char, 4> invalidRva{static_cast<char>(0xf0), static_cast<char>(0xff), static_cast<char>(0xff), static_cast<char>(0xff)};
-            corrupt.seekp(LoadRva + 0x300);
-            if (!corrupt.write(invalidRva.data(), invalidRva.size()))
-                throw std::runtime_error("Cannot corrupt diagnostic fixture");
-        }
-        expectDiagnostic(runner, {"invalid or unsupported PE dependency metadata"});
-        writeFile(root, {0, 1, 2});
-        expectDiagnostic(runner, {"dependency module is not a Windows PE image: " + root.string()});
         std::vector<std::uint8_t> elf{0x7f, 'E', 'L', 'F', 2, 1, 1};
         elf.resize(64);
-        writeFile(root, elf);
-        expectDiagnostic(runner, {"dependency module is not a Windows PE image: " + root.string(), "Importer: " + runner.string(), "Chain: " + runner.string() + " -> " + root.string() + "\n"});
-        Fs::remove(root);
-        expectDiagnostic(runner, {"dependency module not found: " + root.string(), "Importer: " + runner.string(), "Chain: " + runner.string() + " -> " + root.string() + "\n"});
-        Fs::create_directory(root);
-        expectDiagnostic(runner, {"Windows API failed"});
-        Fs::remove(root);
-        createImage(root, {{middle.filename().string(), "Middle"}}, {});
-        writeFile(middle, elf);
-        expectDiagnostic(runner, {"dependency module is not a Windows PE image: " + middle.string(), "Importer: " + root.string(), "Chain: " + runner.string() + " -> " + root.string() + " -> " + middle.string() + "\n"});
+        std::size_t executed = 0;
+        const auto run = [&](const std::string_view name, const auto& check) {
+            if (scenario != "all" && scenario != name)
+                return;
+            if (executed == 0) {
+                createRunner(runner, root);
+                const auto utf8 = directory.u8string();
+                std::cout << "Diagnostic fixture directory: " << std::string(utf8.begin(), utf8.end()) << '\n';
+            }
+            std::cout << "Diagnostic scenario: " << name << std::endl;
+            check();
+            ++executed;
+        };
+        run("missing_symbol", [&] {
+            createImage(root, {{middle.filename().string(), "Middle"}}, {});
+            createImage(middle, {{leaf.filename().string(), "Missing"}}, "Middle");
+            createImage(leaf, {}, "Present");
+            expectDiagnostic(runner, {"Importer: " + middle.string(), "Provider: " + leaf.string(), "Symbol: Missing", runner.string() + " -> " + root.string() + " -> " + middle.string() + " -> " + leaf.string()});
+        });
+        run("missing_ordinal", [&] {
+            createImage(root, {{middle.filename().string(), "Middle"}}, {});
+            createImage(middle, {{leaf.filename().string(), "#8"}}, "Middle");
+            createImage(leaf, {}, "Present");
+            expectDiagnostic(runner, {"Symbol: #8"});
+        });
+        run("present_ordinal", [&] {
+            createImage(root, {{middle.filename().string(), "Middle"}}, {});
+            createImage(middle, {{leaf.filename().string(), "#7"}}, "Middle");
+            createImage(leaf, {}, "Present");
+            expectDiagnostic(runner, {"Dependency tables contain no missing imports"});
+        });
+        run("forwarded_missing_symbol", [&] {
+            createImage(root, {{middle.filename().string(), "Middle"}}, {});
+            createImage(middle, {}, "Middle", "diagnostic-leaf.Missing");
+            createImage(leaf, {}, "Present");
+            expectDiagnostic(runner, {"Symbol: Missing", "Importer: " + middle.string()});
+        });
+        run("forwarded_ordinal", [&] {
+            createImage(root, {{middle.filename().string(), "Middle"}}, {});
+            createImage(middle, {}, "Middle", "diagnostic-leaf.#7");
+            createImage(leaf, {}, "Present");
+            expectDiagnostic(runner, {"Dependency tables contain no missing imports"});
+        });
+        run("forwarder_cycle", [&] {
+            createImage(root, {{middle.filename().string(), "Middle"}}, {});
+            createImage(middle, {}, "Middle", "diagnostic-leaf.#7");
+            createImage(leaf, {}, "Present", "diagnostic-middle.Middle");
+            expectDiagnostic(runner, {"capacity exceeded"});
+        });
+        run("import_cycle", [&] {
+            createImage(root, {{middle.filename().string(), "Middle"}}, {});
+            createImage(middle, {{leaf.filename().string(), "Present"}}, "Middle");
+            createImage(leaf, {{middle.filename().string(), "Middle"}}, "Present");
+            expectDiagnostic(runner, {"Dependency tables contain no missing imports"});
+        });
+        run("missing_symbol_in_cycle", [&] {
+            createImage(root, {{middle.filename().string(), "Middle"}}, {});
+            createImage(middle, {{leaf.filename().string(), "Present"}}, "Middle");
+            createImage(leaf, {{middle.filename().string(), "MissingInCycle"}}, "Present");
+            expectDiagnostic(runner, {"Symbol: MissingInCycle", "Importer: " + leaf.string()});
+        });
+        run("missing_module", [&] {
+            createImage(root, {{"diagnostic-absent.dll", "Missing"}}, {});
+            expectDiagnostic(runner, {"dependency module not found", "Importer: " + root.string()});
+        });
+        run("missing_api_set", [&] {
+            createImage(root, {{"api-ms-win-core-relinkerdiagnostics-l1-1-0.dll", "Missing"}}, {});
+            expectDiagnostic(runner, {"dependency module not found: api-ms-win-core-relinkerdiagnostics-l1-1-0.dll", "Importer: " + root.string(), runner.string() + " -> " + root.string() + " -> api-ms-win-core-relinkerdiagnostics-l1-1-0.dll"});
+        });
+        run("system_forwarder", [&] {
+            createImage(root, {{"KERNEL32.dll", "CreateRemoteThreadEx"}}, {});
+            expectDiagnostic(runner, {"Dependency tables contain no missing imports"});
+        });
+        run("missing_system_symbol", [&] {
+            createImage(root, {{"KERNEL32.dll", "RelinkerDiagnosticsMissingExport"}}, {});
+            expectDiagnostic(runner, {"Symbol: RelinkerDiagnosticsMissingExport"});
+        });
+        run("invalid_metadata", [&] {
+            createImage(root, {{"KERNEL32.dll", "RelinkerDiagnosticsMissingExport"}}, {});
+            {
+                std::fstream corrupt;
+                openFixture(corrupt, root, std::ios::binary | std::ios::in | std::ios::out);
+                const std::array<char, 4> invalidRva{static_cast<char>(0xf0), static_cast<char>(0xff), static_cast<char>(0xff), static_cast<char>(0xff)};
+                corrupt.seekp(LoadRva + 0x300);
+                if (!corrupt.write(invalidRva.data(), invalidRva.size()))
+                    throw std::runtime_error("Cannot corrupt diagnostic fixture");
+            }
+            expectDiagnostic(runner, {"invalid or unsupported PE dependency metadata"});
+        });
+        run("truncated_image", [&] {
+            writeFile(root, {0, 1, 2});
+            expectDiagnostic(runner, {"dependency module is not a Windows PE image: " + root.string()});
+        });
+        run("elf_root", [&] {
+            writeFile(root, elf);
+            expectDiagnostic(runner, {"dependency module is not a Windows PE image: " + root.string(), "Importer: " + runner.string(), "Chain: " + runner.string() + " -> " + root.string() + "\n"});
+        });
+        run("missing_root", [&] {
+            Fs::remove(root);
+            expectDiagnostic(runner, {"dependency module not found: " + root.string(), "Importer: " + runner.string(), "Chain: " + runner.string() + " -> " + root.string() + "\n"});
+        });
+        run("directory_root", [&] {
+            Fs::create_directory(root);
+            expectDiagnostic(runner, {"Windows API failed"});
+            Fs::remove(root);
+        });
+        run("elf_dependency", [&] {
+            createImage(root, {{middle.filename().string(), "Middle"}}, {});
+            writeFile(middle, elf);
+            expectDiagnostic(runner, {"dependency module is not a Windows PE image: " + middle.string(), "Importer: " + root.string(), "Chain: " + runner.string() + " -> " + root.string() + " -> " + middle.string() + "\n"});
+        });
         removeFixtures(directory);
+        if (executed == 0)
+            throw std::runtime_error("Unknown diagnostic scenario: " + std::string(scenario));
+        std::cout << "Diagnostics executed: " << executed << '\n';
         std::cout << "Windows dependency machine-code tests passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
